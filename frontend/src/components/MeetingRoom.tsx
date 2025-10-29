@@ -8,9 +8,9 @@ import {
   PhoneOff,
   Users,
   MonitorUp,
+  User,
 } from 'lucide-react';
 import socketService from '../Services/socketService';
-import VideoTitle from './VideoTitle';
 import { type Participant } from '../types';
 import {
   getLocalStream,
@@ -26,6 +26,79 @@ import {
   stopScreenShare,
 } from '../utils/webrtc';
 import './MeetingRoom.css';
+
+// Inline VideoTile component to avoid import issues
+const VideoTile: React.FC<{
+  participant: Participant;
+  isLocal?: boolean;
+  videoRef?: React.RefObject<HTMLVideoElement | null>;
+}> = ({ participant, isLocal = false, videoRef }) => {
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const ref = videoRef || localVideoRef;
+
+  useEffect(() => {
+    console.log(`🎬 VideoTile effect for ${participant.displayName}:`, {
+      hasStream: !!participant.stream,
+      videoEnabled: participant.videoEnabled,
+      audioEnabled: participant.audioEnabled,
+      streamTracks: participant.stream?.getTracks().length || 0,
+    });
+    
+    if (ref.current && participant.stream) {
+      console.log(`✅ Attaching stream for ${participant.displayName}`);
+      ref.current.srcObject = participant.stream;
+      
+      // Force play for remote videos
+      if (!isLocal) {
+        ref.current.play().catch((e) => {
+          console.warn(`Could not autoplay video for ${participant.displayName}:`, e);
+        });
+      }
+    }
+  }, [participant.stream, participant.displayName, isLocal, ref]);
+
+  return (
+    <div className="video-tile">
+      {participant.videoEnabled && participant.stream ? (
+        <video
+          ref={ref}
+          autoPlay
+          playsInline
+          muted={isLocal}
+          className="video-element"
+        />
+      ) : (
+        <div className="video-placeholder">
+          <div className="avatar">
+            {participant.displayName ? (
+              participant.displayName.charAt(0).toUpperCase()
+            ) : (
+              <User size={48} />
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="video-info">
+        <span className="participant-name">
+          {participant.displayName} {isLocal && '(You)'}
+        </span>
+        <div className="media-indicators">
+          {!participant.audioEnabled && (
+            <div className="indicator muted">
+              <MicOff size={16} />
+            </div>
+          )}
+          {!participant.videoEnabled && (
+            <div className="indicator video-off">
+              <VideoOff size={16} />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const MeetingRoom: React.FC = () => {
   const { meetingId } = useParams<{ meetingId: string }>();
@@ -45,14 +118,21 @@ const MeetingRoom: React.FC = () => {
   const [showParticipantsList, setShowParticipantsList] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(true);
+  const [localVideoProblem, setLocalVideoProblem] = useState<string | null>(null);
 
   const socketRef = useRef<any>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  const isInitializedRef = useRef(false);
 
   // Initialize and join meeting
   useEffect(() => {
+    if (isInitializedRef.current) return;
+    isInitializedRef.current = true;
+
     const initMeeting = async () => {
       try {
+        console.log('🚀 Starting meeting initialization...');
+        
         // Get display name
         const displayName =
           location.state?.displayName ||
@@ -66,32 +146,49 @@ const MeetingRoom: React.FC = () => {
           localStorage.setItem('token', token);
         }
 
-        // Get local media stream
-        console.log('🎥 Getting local media stream...');
-        const stream = await getLocalStream(true, true);
-        console.log('🎥 Local media stream obtained:', stream);
-        if (!stream) {  
-          setError('Failed to access camera/microphone. Please check permissions.');
-          setIsJoining(false);
-          return;
-        }
-       if (!stream) {  
-          setLocalStream(stream);
-        }
+        // Try to get local media stream
+        console.log('🎥 Attempting to get local media stream...');
+        let stream: MediaStream | null = null;
         
- 
-        // Set local video
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
+        try {
+          stream = await getLocalStream(true, true);
+          console.log('✅ Successfully obtained local stream:', {
+            id: stream.id,
+            tracks: stream.getTracks().map(t => ({
+              kind: t.kind,
+              enabled: t.enabled,
+              readyState: t.readyState,
+            })),
+          });
+          
+          setLocalStream(stream);
+          setAudioEnabled(true);
+          setVideoEnabled(true);
+          
+          // Attach to video element immediately
+          if (localVideoRef.current && stream) {
+            localVideoRef.current.srcObject = stream;
+            localVideoRef.current.muted = true;
+            localVideoRef.current.play().catch(e => 
+              console.warn('Local video autoplay failed:', e)
+            );
+          }
+        } catch (e) {
+          console.warn('⚠️ Could not get local media stream:', e);
+          setAudioEnabled(false);
+          setVideoEnabled(false);
+          setLocalVideoProblem(
+            'Could not access camera/microphone. You can still join to view others.'
+          );
         }
 
         // Connect to signaling server
-        console.log('Connecting to signaling server...');
+        console.log('🔌 Connecting to signaling server...');
         const socket = socketService.connect(token);
         socketRef.current = socket;
 
         // Setup socket listeners
-        setupSocketListeners(socket, displayName, stream);
+        setupSocketListeners(socket, stream);
 
         // Join meeting
         console.log(`📞 Joining meeting ${meetingId}...`);
@@ -112,17 +209,22 @@ const MeetingRoom: React.FC = () => {
 
     // Cleanup on unmount
     return () => {
-      console.log('Cleaning up meeting room...');
-      socketService.emit('leave-meeting');
-      socketService.disconnect();
+      console.log('🧹 Cleaning up meeting room...');
+      if (socketRef.current) {
+        socketService.emit('leave-meeting');
+        socketService.disconnect();
+      }
       stopLocalStream();
       closeAllConnections();
+      isInitializedRef.current = false;
     };
-  }, [meetingId]);
+  }, [meetingId, location.state?.displayName]);
 
   // Setup socket event listeners
   const setupSocketListeners = useCallback(
-    (socket: any, displayName: string, stream: MediaStream) => {
+    (socket: any, stream: MediaStream | null) => {
+      console.log('📡 Setting up socket listeners...');
+      
       // Remove all previous listeners to prevent duplicates
       socket.removeAllListeners('joined-meeting');
       socket.removeAllListeners('participant-joined');
@@ -135,9 +237,12 @@ const MeetingRoom: React.FC = () => {
 
       // Successfully joined meeting
       socket.on('joined-meeting', (data: any) => {
-        console.log('✅ Successfully joined meeting:', data);
-        console.log('📊 Local participant:', data.participant);
-        console.log('📊 Remote participants count:', data.participants.length);
+        console.log('✅ Successfully joined meeting:', {
+          meetingId: data.meetingId,
+          localParticipant: data.participant,
+          participantCount: data.participants.length,
+        });
+        
         setIsJoining(false);
 
         // Set local participant
@@ -146,42 +251,39 @@ const MeetingRoom: React.FC = () => {
           userId: data.participant.userId,
           displayName: data.participant.displayName,
           isHost: data.participant.isHost,
-          audioEnabled: true,
-          videoEnabled: true,
+          audioEnabled: !!stream && stream.getAudioTracks().some(t => t.enabled),
+          videoEnabled: !!stream && stream.getVideoTracks().some(t => t.enabled),
           screenShareEnabled: false,
-          stream: stream,
+          stream: stream ?? undefined,
         };
         setLocalParticipant(local);
 
-        // Add existing participants (don't include yourself)
+        // Add existing participants
         const newParticipants = new Map<string, Participant>();
         data.participants.forEach((p: any) => {
-          console.log('👤 Processing existing participant:', p.displayName, p.socketId);
-          // Only add if it's not the current user
           if (p.socketId !== data.participant.socketId) {
-            console.log('✅ Adding participant to list:', p.displayName);
+            console.log('👤 Adding existing participant:', p.displayName, p.socketId);
             newParticipants.set(p.socketId, {
               ...p,
               stream: undefined,
             });
 
             // Create WebRTC connection for existing participant
-            handleNewPeer(p.socketId, socket, handleRemoteStream);
-          } else {
-            console.log('⚠️ Skipping self:', p.displayName);
+            console.log('🔗 Creating peer connection for:', p.socketId);
+            handleNewPeer(p.socketId, socket, handleRemoteStream, stream);
           }
         });
-        console.log('📊 Final participants map size:', newParticipants.size);
+        
+        console.log('📊 Total remote participants:', newParticipants.size);
         setParticipants(newParticipants);
       });
 
       // New participant joined
       socket.on('participant-joined', (data: any) => {
-        console.log('👋 New participant joined:', data.participant.displayName);
+        console.log('👋 New participant joined:', data.participant.displayName, data.participant.socketId);
 
         setParticipants((prev) => {
           const newMap = new Map(prev);
-          // Only add if not already present
           if (!newMap.has(data.participant.socketId)) {
             newMap.set(data.participant.socketId, {
               ...data.participant,
@@ -192,13 +294,13 @@ const MeetingRoom: React.FC = () => {
         });
 
         // Create WebRTC connection for new participant
-        handleNewPeer(data.participant.socketId, socket, handleRemoteStream);
+        console.log('🔗 Creating peer connection for new participant:', data.participant.socketId);
+        handleNewPeer(data.participant.socketId, socket, handleRemoteStream, stream);
       });
 
       // Participant left
       socket.on('participant-left', (data: any) => {
         console.log('👋 Participant left:', data.socketId);
-
         setParticipants((prev) => {
           const newMap = new Map(prev);
           newMap.delete(data.socketId);
@@ -209,21 +311,17 @@ const MeetingRoom: React.FC = () => {
       // Participant media changed
       socket.on('participant-media-changed', (data: any) => {
         console.log('🎬 Participant media changed:', data);
-
         setParticipants((prev) => {
           const newMap = new Map(prev);
           const participant = newMap.get(data.socketId);
-
           if (participant) {
             newMap.set(data.socketId, {
               ...participant,
               audioEnabled: data.audioEnabled ?? participant.audioEnabled,
               videoEnabled: data.videoEnabled ?? participant.videoEnabled,
-              screenShareEnabled:
-                data.screenShareEnabled ?? participant.screenShareEnabled,
+              screenShareEnabled: data.screenShareEnabled ?? participant.screenShareEnabled,
             });
           }
-
           return newMap;
         });
       });
@@ -231,7 +329,7 @@ const MeetingRoom: React.FC = () => {
       // WebRTC Signaling Events
       socket.on('offer', (data: any) => {
         console.log('📥 Received offer from:', data.from);
-        handleOffer(data, socket, handleRemoteStream);
+        handleOffer(data, socket, handleRemoteStream, stream);
       });
 
       socket.on('answer', (data: any) => {
@@ -256,17 +354,29 @@ const MeetingRoom: React.FC = () => {
   // Handle remote stream
   const handleRemoteStream = useCallback(
     (peerId: string, stream: MediaStream) => {
-      console.log('📺 Setting remote stream for peer:', peerId);
+      console.log('📺 Received remote stream from peer:', peerId, {
+        streamId: stream.id,
+        tracks: stream.getTracks().map(t => ({
+          kind: t.kind,
+          enabled: t.enabled,
+          readyState: t.readyState,
+        })),
+      });
 
       setParticipants((prev) => {
         const newMap = new Map(prev);
         const participant = newMap.get(peerId);
 
         if (participant) {
+          console.log('✅ Updating participant with stream:', participant.displayName);
           newMap.set(peerId, {
             ...participant,
             stream: stream,
+            audioEnabled: stream.getAudioTracks().some(t => t.enabled),
+            videoEnabled: stream.getVideoTracks().some(t => t.enabled),
           });
+        } else {
+          console.warn('⚠️ Received stream for unknown participant:', peerId);
         }
 
         return newMap;
@@ -277,7 +387,14 @@ const MeetingRoom: React.FC = () => {
 
   // Toggle audio
   const handleToggleAudio = () => {
+    if (!localStream) {
+      console.warn('No local stream to toggle audio');
+      return;
+    }
+
     const newState = !audioEnabled;
+    console.log('🎤 Toggling audio to:', newState);
+    
     setAudioEnabled(newState);
     toggleAudioTrack(newState);
     socketService.emit('toggle-audio', { enabled: newState });
@@ -291,8 +408,34 @@ const MeetingRoom: React.FC = () => {
   };
 
   // Toggle video
-  const handleToggleVideo = () => {
+  const handleToggleVideo = async () => {
     const newState = !videoEnabled;
+    console.log('📹 Toggling video to:', newState);
+    
+    // If enabling video but we don't have a local stream, try to get one
+    if (newState && !localStream) {
+      try {
+        console.log('🎥 Attempting to get new stream...');
+        const s = await getLocalStream(true, true);
+        if (s) {
+          console.log('✅ Got new stream');
+          setLocalStream(s);
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = s;
+            localVideoRef.current.muted = true;
+            localVideoRef.current.play().catch(e => console.warn('Play failed:', e));
+          }
+          setAudioEnabled(s.getAudioTracks().some(t => t.enabled));
+          setVideoEnabled(s.getVideoTracks().some(t => t.enabled));
+          setLocalVideoProblem(null);
+        }
+      } catch (err) {
+        console.error('❌ Error obtaining stream on toggle:', err);
+        setLocalVideoProblem('Could not access camera. Check permissions.');
+        return;
+      }
+    }
+
     setVideoEnabled(newState);
     toggleVideoTrack(newState);
     socketService.emit('toggle-video', { enabled: newState });
@@ -322,6 +465,7 @@ const MeetingRoom: React.FC = () => {
 
   // Leave meeting
   const handleLeaveMeeting = () => {
+    console.log('👋 Leaving meeting...');
     socketService.emit('leave-meeting');
     socketService.disconnect();
     stopLocalStream();
@@ -352,6 +496,8 @@ const MeetingRoom: React.FC = () => {
     );
   }
 
+  const totalParticipants = participants.size + 1;
+
   return (
     <div className="meeting-room">
       {/* Header */}
@@ -360,7 +506,7 @@ const MeetingRoom: React.FC = () => {
           <h3>Meeting: {meetingId}</h3>
           <span className="participant-count">
             <Users size={16} />
-            {participants.size + 1} participant{participants.size !== 0 ? 's' : ''}
+            {totalParticipants} participant{totalParticipants !== 1 ? 's' : ''}
           </span>
         </div>
 
@@ -375,58 +521,36 @@ const MeetingRoom: React.FC = () => {
 
       {/* Video Grid */}
       <div className="video-grid-container">
+        {localVideoProblem && (
+          <div className="video-warning" role="alert">
+            ⚠️ {localVideoProblem}
+          </div>
+        )}
         <div
           className={`video-grid ${
-            participants.size + 1 === 1
+            totalParticipants === 1
               ? 'grid-1'
-              : participants.size + 1 === 2
+              : totalParticipants === 2
               ? 'grid-2'
-              : participants.size + 1 <= 4
+              : totalParticipants === 3
+              ? 'grid-3'
+              : totalParticipants <= 4
               ? 'grid-4'
               : 'grid-many'
           }`}
         >
           {/* Local video */}
           {localParticipant && (
-            <div className="video-tile">
-              {videoEnabled && localStream ? (
-                <video
-                  ref={localVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="video-element"
-                />
-              ) : (
-                <div className="video-placeholder">
-                  <div className="avatar">
-                    {localParticipant.displayName.charAt(0).toUpperCase()}
-                  </div>
-                </div>
-              )}
-              <div className="video-info">
-                <span className="participant-name">
-                  {localParticipant.displayName} (You)
-                </span>
-                <div className="media-indicators">
-                  {!audioEnabled && (
-                    <div className="indicator muted">
-                      <MicOff size={16} />
-                    </div>
-                  )}
-                  {!videoEnabled && (
-                    <div className="indicator video-off">
-                      <VideoOff size={16} />
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
+            <VideoTile
+              participant={localParticipant}
+              isLocal={true}
+              videoRef={localVideoRef}
+            />
           )}
 
           {/* Remote videos */}
           {Array.from(participants.values()).map((participant) => (
-            <VideoTitle key={participant.socketId} participant={participant} />
+            <VideoTile key={participant.socketId} participant={participant} />
           ))}
         </div>
       </div>
@@ -472,7 +596,7 @@ const MeetingRoom: React.FC = () => {
       {showParticipantsList && (
         <div className="participants-sidebar">
           <div className="sidebar-header">
-            <h3>Participants ({participants.size + 1})</h3>
+            <h3>Participants ({totalParticipants})</h3>
             <button
               className="close-sidebar"
               onClick={() => setShowParticipantsList(false)}

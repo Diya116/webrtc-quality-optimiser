@@ -1,48 +1,34 @@
-import { Socket } from 'socket.io-client';
+// webrtc.ts - WebRTC utility functions
 
-// ICE Server configuration (STUN/TURN servers)
-const iceServers: RTCIceServer[] = [
-  {
-    urls: [
-      'stun:stun.l.google.com:19302',
-      'stun:stun1.l.google.com:19302',
-      'stun:stun2.l.google.com:19302',
-    ],
-  },
-  // Add TURN server if needed
-  // {
-  //   urls: 'turn:your-turn-server.com:3478',
-  //   username: 'username',
-  //   credential: 'password',
-  // },
-];
+const configuration: RTCConfiguration = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+  ],
+};
 
-// Store peer connections
+let localStream: MediaStream | null = null;
+let screenStream: MediaStream | null = null;
 const peerConnections = new Map<string, RTCPeerConnection>();
 
-// Store remote streams
-const remoteStreams = new Map<string, MediaStream>();
-
-// Local stream
-let localStream: MediaStream | null = null;
-
-/**
- * Get local media stream (camera + microphone)
- */
+// Get local media stream
 export const getLocalStream = async (
-  videoEnabled: boolean = true,
-  audioEnabled: boolean = true
-): Promise<MediaStream | null> => {
+  video: boolean = true,
+  audio: boolean = true
+): Promise<MediaStream> => {
   try {
+    console.log('📹 Requesting media stream:', { video, audio });
+    
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: videoEnabled
+      video: video
         ? {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            facingMode: 'user',
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
+            frameRate: { ideal: 30 },
           }
         : false,
-      audio: audioEnabled
+      audio: audio
         ? {
             echoCancellation: true,
             noiseSuppression: true,
@@ -51,40 +37,95 @@ export const getLocalStream = async (
         : false,
     });
 
+    console.log('✅ Got media stream:', {
+      id: stream.id,
+      videoTracks: stream.getVideoTracks().length,
+      audioTracks: stream.getAudioTracks().length,
+      tracks: stream.getTracks().map(t => ({
+        kind: t.kind,
+        enabled: t.enabled,
+        readyState: t.readyState,
+        label: t.label,
+      })),
+    });
+
     localStream = stream;
-    console.log('✅ Local stream obtained:', stream.id);
+
+    // Listen for track ended events
+    stream.getTracks().forEach((track) => {
+      track.addEventListener('ended', () => {
+        console.warn(`⚠️ Track ended: ${track.kind}`);
+        window.dispatchEvent(new Event('webrtc-local-stream-stopped'));
+      });
+    });
+
     return stream;
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ Error getting local stream:', error);
-    return null;
+    throw new Error(
+      `Failed to access camera/microphone: ${error.message || 'Permission denied'}`
+    );
   }
 };
 
-/**
- * Stop local stream
- */
+// Stop local stream
 export const stopLocalStream = () => {
+  console.log('⏹️ Stopping local stream...');
   if (localStream) {
     localStream.getTracks().forEach((track) => {
       track.stop();
+      console.log(`Stopped ${track.kind} track`);
     });
     localStream = null;
-    console.log('🛑 Local stream stopped');
   }
 };
 
-/**
- * Create RTCPeerConnection for a peer
- */
+// Toggle audio track
+export const toggleAudio = (enabled: boolean) => {
+  console.log('🎤 Toggling audio to:', enabled);
+  if (localStream) {
+    localStream.getAudioTracks().forEach((track) => {
+      track.enabled = enabled;
+      console.log(`Audio track enabled: ${track.enabled}`);
+    });
+  }
+};
+
+// Toggle video track
+export const toggleVideo = (enabled: boolean) => {
+  console.log('📹 Toggling video to:', enabled);
+  if (localStream) {
+    localStream.getVideoTracks().forEach((track) => {
+      track.enabled = enabled;
+      console.log(`Video track enabled: ${track.enabled}`);
+    });
+  }
+};
+
+// Create peer connection
 const createPeerConnection = (
   peerId: string,
-  socket: Socket,
-  onRemoteStream: (peerId: string, stream: MediaStream) => void
+  socket: any,
+  onRemoteStream: (peerId: string, stream: MediaStream) => void,
+  localMediaStream: MediaStream | null
 ): RTCPeerConnection => {
-  const pc = new RTCPeerConnection({ iceServers });
+  console.log('🔗 Creating peer connection for:', peerId);
+
+  const peerConnection = new RTCPeerConnection(configuration);
+
+  // Add local stream tracks to peer connection
+  if (localMediaStream) {
+    console.log('➕ Adding local tracks to peer connection:', peerId);
+    localMediaStream.getTracks().forEach((track) => {
+      console.log(`Adding ${track.kind} track to peer ${peerId}`);
+      peerConnection.addTrack(track, localMediaStream);
+    });
+  } else {
+    console.warn('⚠️ No local stream to add to peer connection');
+  }
 
   // Handle ICE candidates
-  pc.onicecandidate = (event) => {
+  peerConnection.onicecandidate = (event) => {
     if (event.candidate) {
       console.log('🧊 Sending ICE candidate to:', peerId);
       socket.emit('ice-candidate', {
@@ -94,302 +135,251 @@ const createPeerConnection = (
     }
   };
 
-  // Handle remote stream
-  pc.ontrack = (event) => {
-    console.log('📥 Received remote track from:', peerId);
-    const [remoteStream] = event.streams;
-    
-    if (remoteStream) {
-      remoteStreams.set(peerId, remoteStream);
-      onRemoteStream(peerId, remoteStream);
-    }
-  };
-
   // Handle connection state changes
-  pc.onconnectionstatechange = () => {
-    console.log(`🔗 Connection state with ${peerId}:`, pc.connectionState);
+  peerConnection.onconnectionstatechange = () => {
+    console.log(`🔄 Connection state with ${peerId}:`, peerConnection.connectionState);
     
-    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-      console.log(`❌ Peer ${peerId} disconnected`);
-      closePeerConnection(peerId);
+    if (peerConnection.connectionState === 'failed') {
+      console.error('❌ Connection failed with peer:', peerId);
+    } else if (peerConnection.connectionState === 'disconnected') {
+      console.warn('⚠️ Disconnected from peer:', peerId);
+    } else if (peerConnection.connectionState === 'connected') {
+      console.log('✅ Successfully connected to peer:', peerId);
     }
   };
 
   // Handle ICE connection state changes
-  pc.oniceconnectionstatechange = () => {
-    console.log(`🧊 ICE connection state with ${peerId}:`, pc.iceConnectionState);
+  peerConnection.oniceconnectionstatechange = () => {
+    console.log(`❄️ ICE connection state with ${peerId}:`, peerConnection.iceConnectionState);
   };
 
-  // Add local tracks to peer connection
-  if (localStream) {
-    localStream.getTracks().forEach((track) => {
-      pc.addTrack(track, localStream!);
-      console.log(`➕ Added local track to peer ${peerId}:`, track.kind);
+  // Handle remote stream
+  peerConnection.ontrack = (event) => {
+    console.log('📺 Received remote track from:', peerId, {
+      kind: event.track.kind,
+      enabled: event.track.enabled,
+      readyState: event.track.readyState,
+      streams: event.streams.length,
     });
-  }
 
-  peerConnections.set(peerId, pc);
-  return pc;
+    if (event.streams && event.streams[0]) {
+      console.log('✅ Setting remote stream for peer:', peerId);
+      onRemoteStream(peerId, event.streams[0]);
+    }
+  };
+
+  peerConnections.set(peerId, peerConnection);
+  return peerConnection;
 };
 
-/**
- * Close peer connection
- */
-const closePeerConnection = (peerId: string) => {
-  const pc = peerConnections.get(peerId);
-  
-  if (pc) {
-    pc.close();
-    peerConnections.delete(peerId);
-    console.log(`🔌 Closed peer connection with ${peerId}`);
-  }
-
-  remoteStreams.delete(peerId);
-};
-
-/**
- * Handle new peer joining (create offer)
- */
+// Handle new peer (create offer)
 export const handleNewPeer = async (
   peerId: string,
-  socket: Socket,
-  onRemoteStream: (peerId: string, stream: MediaStream) => void
-): Promise<void> => {
+  socket: any,
+  onRemoteStream: (peerId: string, stream: MediaStream) => void,
+  localMediaStream: MediaStream | null = null
+) => {
   try {
-    console.log('👋 New peer joined, creating offer for:', peerId);
+    console.log('👤 Handling new peer (creating offer):', peerId);
 
-    // Create peer connection
-    const pc = createPeerConnection(peerId, socket, onRemoteStream);
+    const peerConnection = createPeerConnection(
+      peerId,
+      socket,
+      onRemoteStream,
+      localMediaStream
+    );
 
-    // Create offer
-    const offer = await pc.createOffer({
+    // Create and send offer
+    console.log('📤 Creating offer for:', peerId);
+    const offer = await peerConnection.createOffer({
       offerToReceiveAudio: true,
       offerToReceiveVideo: true,
     });
 
-    await pc.setLocalDescription(offer);
+    await peerConnection.setLocalDescription(offer);
+    console.log('✅ Local description set, sending offer to:', peerId);
 
-    // Send offer to peer
-    console.log('📤 Sending offer to:', peerId);
     socket.emit('offer', {
       to: peerId,
-      offer: pc.localDescription,
+      offer: offer,
     });
   } catch (error) {
-    console.error('❌ Error creating offer:', error);
+    console.error('❌ Error handling new peer:', error);
   }
 };
 
-/**
- * Handle received offer (create answer)
- */
+// Handle incoming offer (create answer)
 export const handleOffer = async (
   data: { from: string; offer: RTCSessionDescriptionInit },
-  socket: Socket,
-  onRemoteStream: (peerId: string, stream: MediaStream) => void
-): Promise<void> => {
+  socket: any,
+  onRemoteStream: (peerId: string, stream: MediaStream) => void,
+  localMediaStream: MediaStream | null = null
+) => {
   try {
-    const { from: peerId, offer } = data;
-    console.log('📥 Received offer from:', peerId);
+    console.log('📥 Handling offer from:', data.from);
 
-    // Create peer connection if doesn't exist
-    let pc = peerConnections.get(peerId);
-    if (!pc) {
-      pc = createPeerConnection(peerId, socket, onRemoteStream);
+    let peerConnection = peerConnections.get(data.from);
+
+    if (!peerConnection) {
+      console.log('Creating new peer connection for:', data.from);
+      peerConnection = createPeerConnection(
+        data.from,
+        socket,
+        onRemoteStream,
+        localMediaStream
+      );
     }
 
-    // Set remote description
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    console.log('🤝 Setting remote description (offer)');
+    await peerConnection.setRemoteDescription(
+      new RTCSessionDescription(data.offer)
+    );
 
-    // Create answer
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+    console.log('📤 Creating answer for:', data.from);
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
 
-    // Send answer to peer
-    console.log('📤 Sending answer to:', peerId);
+    console.log('✅ Sending answer to:', data.from);
     socket.emit('answer', {
-      to: peerId,
-      answer: pc.localDescription,
+      to: data.from,
+      answer: answer,
     });
   } catch (error) {
     console.error('❌ Error handling offer:', error);
   }
 };
 
-/**
- * Handle received answer
- */
+// Handle incoming answer
 export const handleAnswer = async (data: {
   from: string;
   answer: RTCSessionDescriptionInit;
-}): Promise<void> => {
+}) => {
   try {
-    const { from: peerId, answer } = data;
-    console.log('📥 Received answer from:', peerId);
+    console.log('📥 Handling answer from:', data.from);
 
-    const pc = peerConnections.get(peerId);
-    if (!pc) {
-      console.error('❌ No peer connection found for:', peerId);
+    const peerConnection = peerConnections.get(data.from);
+
+    if (!peerConnection) {
+      console.error('❌ No peer connection found for:', data.from);
       return;
     }
 
-    await pc.setRemoteDescription(new RTCSessionDescription(answer));
-    console.log('✅ Set remote description for:', peerId);
+    console.log('🤝 Setting remote description (answer)');
+    await peerConnection.setRemoteDescription(
+      new RTCSessionDescription(data.answer)
+    );
+
+    console.log('✅ Answer processed for:', data.from);
   } catch (error) {
     console.error('❌ Error handling answer:', error);
   }
 };
 
-/**
- * Handle received ICE candidate
- */
+// Handle ICE candidate
 export const handleIceCandidate = async (data: {
   from: string;
   candidate: RTCIceCandidateInit;
-}): Promise<void> => {
+}) => {
   try {
-    const { from: peerId, candidate } = data;
-    console.log('🧊 Received ICE candidate from:', peerId);
+    console.log('🧊 Handling ICE candidate from:', data.from);
 
-    const pc = peerConnections.get(peerId);
-    if (!pc) {
-      console.error('❌ No peer connection found for:', peerId);
+    const peerConnection = peerConnections.get(data.from);
+
+    if (!peerConnection) {
+      console.error('❌ No peer connection found for:', data.from);
       return;
     }
 
-    await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    console.log('✅ Added ICE candidate for:', peerId);
+    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+    console.log('✅ ICE candidate added for:', data.from);
   } catch (error) {
     console.error('❌ Error handling ICE candidate:', error);
   }
 };
 
-/**
- * Toggle local audio track
- */
-export const toggleAudio = (enabled: boolean): void => {
-  if (localStream) {
-    localStream.getAudioTracks().forEach((track) => {
-      track.enabled = enabled;
-    });
-    console.log(`🎤 Audio ${enabled ? 'enabled' : 'disabled'}`);
-  }
-};
-
-/**
- * Toggle local video track
- */
-export const toggleVideo = (enabled: boolean): void => {
-  if (localStream) {
-    localStream.getVideoTracks().forEach((track) => {
-      track.enabled = enabled;
-    });
-    console.log(`📹 Video ${enabled ? 'enabled' : 'disabled'}`);
-  }
-};
-
-/**
- * Replace video track (for screen sharing)
- */
-export const replaceVideoTrack = async (
-  newTrack: MediaStreamTrack
-): Promise<void> => {
-  try {
-    peerConnections.forEach((pc, peerId) => {
-      const sender = pc
-        .getSenders()
-        .find((s) => s.track?.kind === 'video');
-      
-      if (sender) {
-        sender.replaceTrack(newTrack);
-        console.log('✅ Replaced video track for peer:', peerId);
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error replacing video track:', error);
-  }
-};
-
-/**
- * Start screen sharing
- */
+// Start screen share
 export const startScreenShare = async (): Promise<MediaStream | null> => {
   try {
-    const screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
+    console.log('🖥️ Starting screen share...');
+    
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { cursor: 'always' } as any,
       audio: false,
     });
 
-    const screenTrack = screenStream.getVideoTracks()[0];
+    screenStream = stream;
 
-    // Replace video track with screen track
-    await replaceVideoTrack(screenTrack);
-
-    // Handle screen share stop
-    screenTrack.onended = () => {
+    // Handle stream ended
+    stream.getVideoTracks()[0].addEventListener('ended', () => {
+      console.log('🖥️ Screen share stopped');
       stopScreenShare();
-    };
+    });
 
-    console.log('🖥️ Screen sharing started');
-    return screenStream;
-  } catch (error) {
+    // Replace video track in all peer connections
+    const videoTrack = stream.getVideoTracks()[0];
+    peerConnections.forEach((peerConnection, peerId) => {
+      const senders = peerConnection.getSenders();
+      const videoSender = senders.find((s) => s.track?.kind === 'video');
+      if (videoSender) {
+        console.log('🔄 Replacing video track for peer:', peerId);
+        videoSender.replaceTrack(videoTrack);
+      }
+    });
+
+    console.log('✅ Screen share started');
+    return stream;
+  } catch (error: any) {
     console.error('❌ Error starting screen share:', error);
     return null;
   }
 };
 
-/**
- * Stop screen sharing
- */
-export const stopScreenShare = async (): Promise<void> => {
+// Stop screen share
+export const stopScreenShare = async () => {
+  console.log('⏹️ Stopping screen share...');
+  
+  if (screenStream) {
+    screenStream.getTracks().forEach((track) => track.stop());
+    screenStream = null;
+  }
+
+  // Restore camera video track
   if (localStream) {
     const videoTrack = localStream.getVideoTracks()[0];
     if (videoTrack) {
-      await replaceVideoTrack(videoTrack);
-      console.log('🖥️ Screen sharing stopped');
+      peerConnections.forEach((peerConnection, peerId) => {
+        const senders = peerConnection.getSenders();
+        const videoSender = senders.find((s) => s.track?.kind === 'video');
+        if (videoSender) {
+          console.log('🔄 Restoring camera track for peer:', peerId);
+          videoSender.replaceTrack(videoTrack);
+        }
+      });
     }
   }
+
+  console.log('✅ Screen share stopped');
 };
 
-/**
- * Get remote stream for a peer
- */
-export const getRemoteStream = (peerId: string): MediaStream | undefined => {
-  return remoteStreams.get(peerId);
-};
-
-/**
- * Close all peer connections
- */
-export const closeAllConnections = (): void => {
-  peerConnections.forEach((_pc, peerId) => {
-    closePeerConnection(peerId);
+// Close all peer connections
+export const closeAllConnections = () => {
+  console.log('🔌 Closing all peer connections...');
+  
+  peerConnections.forEach((peerConnection, peerId) => {
+    console.log('Closing connection with:', peerId);
+    peerConnection.close();
   });
+  
   peerConnections.clear();
-  remoteStreams.clear();
-  console.log('🔌 All peer connections closed');
+  console.log('✅ All connections closed');
 };
 
-/**
- * Get all peer connection IDs
- */
-export const getPeerIds = (): string[] => {
-  return Array.from(peerConnections.keys());
+// Get peer connection (for debugging)
+export const getPeerConnection = (peerId: string): RTCPeerConnection | undefined => {
+  return peerConnections.get(peerId);
 };
 
-/**
- * Get peer connection stats
- */
-export const getPeerConnectionStats = async (
-  peerId: string
-): Promise<RTCStatsReport | null> => {
-  const pc = peerConnections.get(peerId);
-  if (!pc) return null;
-
-  try {
-    return await pc.getStats();
-  } catch (error) {
-    console.error('❌ Error getting stats:', error);
-    return null;
-  }
+// Get all peer connections (for debugging)
+export const getAllPeerConnections = (): Map<string, RTCPeerConnection> => {
+  return peerConnections;
 };
