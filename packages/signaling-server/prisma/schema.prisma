@@ -1,0 +1,100 @@
+// Prisma Schema for Video Conference Platform
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User model
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  name         String
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  hostedMeetings Meeting[]     @relation("MeetingHost")
+  participants   Participant[]
+
+  @@map("users")
+}
+
+// Meeting model
+model Meeting {
+  id        String   @id @default(uuid())
+  meetingId String   @unique @map("meeting_id") @db.VarChar(50)
+  hostId    String   @map("host_id")
+  title     String
+  status    MeetingStatus @default(SCHEDULED)
+  startedAt DateTime? @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  host         User          @relation("MeetingHost", fields: [hostId], references: [id], onDelete: Cascade)
+  participants Participant[]
+  recordings   Recording[]
+
+  @@index([meetingId])
+  @@index([hostId])
+  @@index([status])
+  @@map("meetings")
+}
+
+enum MeetingStatus {
+  SCHEDULED
+  ACTIVE
+  ENDED
+}
+
+// Participant model
+model Participant {
+  id          String    @id @default(uuid())
+  meetingId   String    @map("meeting_id")
+  userId      String    @map("user_id")
+  displayName String    @map("display_name")
+  isHost      Boolean   @default(false) @map("is_host")
+  joinedAt    DateTime  @default(now()) @map("joined_at")
+  leftAt      DateTime? @map("left_at")
+
+  // Relations
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId])
+  @@index([userId])
+  @@map("participants")
+}
+
+// Recording model
+model Recording {
+  id         String    @id @default(uuid())
+  meetingId  String    @map("meeting_id")
+  filePath   String    @map("file_path")
+  fileSize   BigInt    @map("file_size")
+  duration   Int       // in seconds
+  status     RecordingStatus @default(PROCESSING)
+  startedAt  DateTime  @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId])
+  @@index([status])
+  @@map("recordings")
+}
+
+enum RecordingStatus {
+  PROCESSING
+  COMPLETED
+  FAILED
+}
