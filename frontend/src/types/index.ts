@@ -22,7 +22,7 @@ export interface Participant {
   audioEnabled: boolean;
   videoEnabled: boolean;
   screenShareEnabled: boolean;
-  stream?: MediaStream;
+  stream?: MediaStream|null;
 }
 
 export interface JoinMeetingData {

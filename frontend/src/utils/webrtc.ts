@@ -95,6 +95,10 @@ export const toggleAudio = (enabled: boolean) => {
 export const toggleVideo = (enabled: boolean) => {
   console.log('📹 Toggling video to:', enabled);
   if (localStream) {
+    console.log('Current video tracks:', localStream.getVideoTracks().map(t => ({
+      id: t.id,
+      enabled: t.enabled,
+    })));
     localStream.getVideoTracks().forEach((track) => {
       track.enabled = enabled;
       console.log(`Video track enabled: ${track.enabled}`);
@@ -264,16 +268,27 @@ export const handleAnswer = async (data: {
       return;
     }
 
+    console.log('📡 Current signaling state:', peerConnection.signalingState);
+
+    // ✅ Prevent applying duplicate or out-of-order answers
+    if (peerConnection.signalingState !== 'have-local-offer') {
+      console.warn(
+        `⚠️ Skipping answer from ${data.from} — current state is "${peerConnection.signalingState}"`
+      );
+      return;
+    }
+
     console.log('🤝 Setting remote description (answer)');
     await peerConnection.setRemoteDescription(
       new RTCSessionDescription(data.answer)
     );
 
-    console.log('✅ Answer processed for:', data.from);
+    console.log('✅ Answer processed successfully for:', data.from);
   } catch (error) {
     console.error('❌ Error handling answer:', error);
   }
 };
+
 
 // Handle ICE candidate
 export const handleIceCandidate = async (data: {

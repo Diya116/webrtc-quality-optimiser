@@ -27,7 +27,7 @@ import {
 } from '../utils/webrtc';
 import './MeetingRoom.css';
 
-// Inline VideoTile component to avoid import issues
+// Fixed VideoTile component with proper stream attachment
 const VideoTile: React.FC<{
   participant: Participant;
   isLocal?: boolean;
@@ -35,38 +35,160 @@ const VideoTile: React.FC<{
 }> = ({ participant, isLocal = false, videoRef }) => {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const ref = videoRef || localVideoRef;
+  const [playError, setPlayError] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const streamAttachedRef = useRef<string | null>(null);
 
+  // Effect to attach and play stream
   useEffect(() => {
+    const videoElement = ref.current;
+    const stream = participant.stream;
+
     console.log(`🎬 VideoTile effect for ${participant.displayName}:`, {
-      hasStream: !!participant.stream,
+      hasVideoElement: !!videoElement,
+      hasStream: !!stream,
+      streamId: stream?.id,
       videoEnabled: participant.videoEnabled,
       audioEnabled: participant.audioEnabled,
-      streamTracks: participant.stream?.getTracks().length || 0,
+      streamTracks: stream?.getTracks().length || 0,
+      isLocal,
+      currentStreamAttached: streamAttachedRef.current,
     });
-    
-    if (ref.current && participant.stream) {
-      console.log(`✅ Attaching stream for ${participant.displayName}`);
-      ref.current.srcObject = participant.stream;
-      
-      // Force play for remote videos
-      if (!isLocal) {
-        ref.current.play().catch((e) => {
-          console.warn(`Could not autoplay video for ${participant.displayName}:`, e);
+
+    // If no video element or no stream, cleanup and return
+    if (!videoElement || !stream) {
+      if (videoElement && videoElement.srcObject) {
+        console.log(`⚠️ Clearing video element for ${participant.displayName}`);
+        videoElement.srcObject = null;
+        streamAttachedRef.current = null;
+      }
+      return;
+    }
+
+    // Check if this stream is already attached
+    if (streamAttachedRef.current === stream.id) {
+      console.log(`✅ Stream already attached for ${participant.displayName}`);
+      return;
+    }
+
+    // Attach stream to video element
+    console.log(`📌 Attaching stream ${stream.id} for ${participant.displayName}`);
+    videoElement.srcObject = stream;
+    streamAttachedRef.current = stream.id;
+
+    // For remote videos, we need to handle autoplay
+    if (!isLocal) {
+      const playVideo = async () => {
+        try {
+          // Wait a tiny bit for the stream to be ready
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
+          console.log(`▶️ Attempting to play video for ${participant.displayName}`);
+          await videoElement.play();
+          console.log(`✅ Video playing for ${participant.displayName}`);
+          setIsPlaying(true);
+          setPlayError(null);
+        } catch (error: any) {
+          console.error(`❌ Autoplay failed for ${participant.displayName}:`, error);
+          
+          // Handle different autoplay errors
+          if (error.name === 'NotAllowedError') {
+            setPlayError('Click to play video');
+            console.log(`🖱️ User interaction needed for ${participant.displayName}`);
+          } else if (error.name === 'NotSupportedError') {
+            setPlayError('Video format not supported');
+          } else {
+            setPlayError('Failed to play video');
+          }
+        }
+      };
+
+      playVideo();
+
+      // Also try to play when tracks become active
+      const handleTrackActive = () => {
+        console.log(`🎵 Track became active for ${participant.displayName}`);
+        if (!isPlaying && videoElement.paused) {
+          playVideo();
+        }
+      };
+
+      stream.getTracks().forEach(track => {
+        if (track.readyState === 'live') {
+          handleTrackActive();
+        }
+        track.addEventListener('unmute', handleTrackActive);
+      });
+
+      // Cleanup track listeners
+      return () => {
+        stream.getTracks().forEach(track => {
+          track.removeEventListener('unmute', handleTrackActive);
         });
+      };
+    } else {
+      // Local video - just ensure it's playing
+      if (videoElement.paused) {
+        videoElement.play().catch(e => 
+          console.warn('Local video play failed:', e)
+        );
+      }
+      setIsPlaying(true);
+    }
+  }, [participant.stream, participant.displayName, isLocal, ref, participant.videoEnabled, participant.audioEnabled, isPlaying]);
+
+  // Handle manual play click for autoplay-blocked videos
+  const handleManualPlay = async () => {
+    const videoElement = ref.current;
+    if (videoElement && videoElement.paused) {
+      try {
+        await videoElement.play();
+        setIsPlaying(true);
+        setPlayError(null);
+        console.log(`✅ Manual play successful for ${participant.displayName}`);
+      } catch (error) {
+        console.error(`❌ Manual play failed for ${participant.displayName}:`, error);
       }
     }
-  }, [participant.stream, participant.displayName, isLocal, ref]);
+  };
 
   return (
     <div className="video-tile">
       {participant.videoEnabled && participant.stream ? (
-        <video
-          ref={ref}
-          autoPlay
-          playsInline
-          muted={isLocal}
-          className="video-element"
-        />
+        <div className="video-container" style={{ position: 'relative', width: '100%', height: '100%' }}>
+          <video
+            ref={ref}
+            autoPlay
+            playsInline
+            muted={isLocal}
+            className="video-element"
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+          {/* Show play button overlay if autoplay failed */}
+          {!isLocal && playError && (
+            <div 
+              onClick={handleManualPlay}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                cursor: 'pointer',
+                zIndex: 10,
+              }}
+            >
+              <div style={{ textAlign: 'center', color: 'white' }}>
+                <div style={{ fontSize: '48px', marginBottom: '8px' }}>▶️</div>
+                <div>{playError}</div>
+              </div>
+            </div>
+          )}
+        </div>
       ) : (
         <div className="video-placeholder">
           <div className="avatar">
@@ -123,6 +245,7 @@ const MeetingRoom: React.FC = () => {
   const socketRef = useRef<any>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const isInitializedRef = useRef(false);
+  const localStreamRef = useRef<MediaStream | null>(null);
 
   // Initialize and join meeting
   useEffect(() => {
@@ -161,17 +284,34 @@ const MeetingRoom: React.FC = () => {
             })),
           });
           
+          localStreamRef.current = stream;
           setLocalStream(stream);
           setAudioEnabled(true);
           setVideoEnabled(true);
           
           // Attach to video element immediately
           if (localVideoRef.current && stream) {
+            console.log('📌 Attaching local stream to video element');
             localVideoRef.current.srcObject = stream;
             localVideoRef.current.muted = true;
-            localVideoRef.current.play().catch(e => 
-              console.warn('Local video autoplay failed:', e)
-            );
+            
+            // Ensure local video plays
+            const playLocal = async () => {
+              try {
+                await localVideoRef.current!.play();
+                console.log('✅ Local video playing');
+              } catch (e) {
+                console.warn('⚠️ Local video autoplay failed:', e);
+                // Try again after a short delay
+                setTimeout(() => {
+                  localVideoRef.current?.play().catch(err => 
+                    console.warn('Local video play retry failed:', err)
+                  );
+                }, 500);
+              }
+            };
+            
+            playLocal();
           }
         } catch (e) {
           console.warn('⚠️ Could not get local media stream:', e);
@@ -216,6 +356,7 @@ const MeetingRoom: React.FC = () => {
       }
       stopLocalStream();
       closeAllConnections();
+      localStreamRef.current = null;
       isInitializedRef.current = false;
     };
   }, [meetingId, location.state?.displayName]);
@@ -245,7 +386,7 @@ const MeetingRoom: React.FC = () => {
         
         setIsJoining(false);
 
-        // Set local participant
+        // Set local participant with stream reference
         const local: Participant = {
           socketId: data.participant.socketId,
           userId: data.participant.userId,
@@ -256,6 +397,13 @@ const MeetingRoom: React.FC = () => {
           screenShareEnabled: false,
           stream: stream ?? undefined,
         };
+        console.log('🎯 Setting local participant with stream:', {
+          displayName: local.displayName,
+          hasStream: !!local.stream,
+          streamId: local.stream?.id,
+          videoEnabled: local.videoEnabled,
+          audioEnabled: local.audioEnabled,
+        });
         setLocalParticipant(local);
 
         // Add existing participants
@@ -308,18 +456,21 @@ const MeetingRoom: React.FC = () => {
         });
       });
 
-      // Participant media changed
+      // Participant media changed - FIXED to preserve stream
       socket.on('participant-media-changed', (data: any) => {
         console.log('🎬 Participant media changed:', data);
         setParticipants((prev) => {
           const newMap = new Map(prev);
           const participant = newMap.get(data.socketId);
           if (participant) {
+            // IMPORTANT: Preserve the existing stream reference
             newMap.set(data.socketId, {
               ...participant,
               audioEnabled: data.audioEnabled ?? participant.audioEnabled,
               videoEnabled: data.videoEnabled ?? participant.videoEnabled,
               screenShareEnabled: data.screenShareEnabled ?? participant.screenShareEnabled,
+              // Don't overwrite stream!
+              stream: participant.stream,
             });
           }
           return newMap;
@@ -351,7 +502,7 @@ const MeetingRoom: React.FC = () => {
     []
   );
 
-  // Handle remote stream
+  // Handle remote stream - FIXED to prevent stream loss
   const handleRemoteStream = useCallback(
     (peerId: string, stream: MediaStream) => {
       console.log('📺 Received remote stream from peer:', peerId, {
@@ -369,12 +520,16 @@ const MeetingRoom: React.FC = () => {
 
         if (participant) {
           console.log('✅ Updating participant with stream:', participant.displayName);
-          newMap.set(peerId, {
+          
+          // Create new participant object with stream
+          const updatedParticipant: Participant = {
             ...participant,
             stream: stream,
             audioEnabled: stream.getAudioTracks().some(t => t.enabled),
             videoEnabled: stream.getVideoTracks().some(t => t.enabled),
-          });
+          };
+          
+          newMap.set(peerId, updatedParticipant);
         } else {
           console.warn('⚠️ Received stream for unknown participant:', peerId);
         }
@@ -387,7 +542,8 @@ const MeetingRoom: React.FC = () => {
 
   // Toggle audio
   const handleToggleAudio = () => {
-    if (!localStream) {
+    const stream = localStreamRef.current;
+    if (!stream) {
       console.warn('No local stream to toggle audio');
       return;
     }
@@ -399,53 +555,50 @@ const MeetingRoom: React.FC = () => {
     toggleAudioTrack(newState);
     socketService.emit('toggle-audio', { enabled: newState });
 
-    if (localParticipant) {
-      setLocalParticipant({
-        ...localParticipant,
+    // Update local participant - preserve stream reference
+    setLocalParticipant((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
         audioEnabled: newState,
-      });
-    }
+        stream: prev.stream, // Preserve stream
+      };
+    });
   };
 
-  // Toggle video
-  const handleToggleVideo = async () => {
-    const newState = !videoEnabled;
-    console.log('📹 Toggling video to:', newState);
-    
-    // If enabling video but we don't have a local stream, try to get one
-    if (newState && !localStream) {
-      try {
-        console.log('🎥 Attempting to get new stream...');
-        const s = await getLocalStream(true, true);
-        if (s) {
-          console.log('✅ Got new stream');
-          setLocalStream(s);
-          if (localVideoRef.current) {
-            localVideoRef.current.srcObject = s;
-            localVideoRef.current.muted = true;
-            localVideoRef.current.play().catch(e => console.warn('Play failed:', e));
-          }
-          setAudioEnabled(s.getAudioTracks().some(t => t.enabled));
-          setVideoEnabled(s.getVideoTracks().some(t => t.enabled));
-          setLocalVideoProblem(null);
-        }
-      } catch (err) {
-        console.error('❌ Error obtaining stream on toggle:', err);
-        setLocalVideoProblem('Could not access camera. Check permissions.');
-        return;
-      }
+  // Toggle video - FIXED to preserve stream
+  const handleToggleVideo = () => {
+    const stream = localStreamRef.current;
+    if (!stream) {
+      console.warn('No local stream to toggle video');
+      return;
     }
 
+    const videoTracks = stream.getVideoTracks();
+    if (videoTracks.length === 0) {
+      console.warn('No video tracks found');
+      return;
+    }
+
+    const newState = !videoTracks[0].enabled;
+    console.log('📹 Toggling local video to:', newState);
+
+    // Toggle the track
+    videoTracks.forEach(track => (track.enabled = newState));
     setVideoEnabled(newState);
-    toggleVideoTrack(newState);
-    socketService.emit('toggle-video', { enabled: newState });
 
-    if (localParticipant) {
-      setLocalParticipant({
-        ...localParticipant,
+    // Update participant UI - preserve stream reference
+    setLocalParticipant((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
         videoEnabled: newState,
-      });
-    }
+        stream: prev.stream, // Preserve stream
+      };
+    });
+
+    // Notify others
+    socketService.emit('toggle-video', { enabled: newState });
   };
 
   // Toggle screen share
@@ -470,6 +623,7 @@ const MeetingRoom: React.FC = () => {
     socketService.disconnect();
     stopLocalStream();
     closeAllConnections();
+    localStreamRef.current = null;
     navigate('/');
   };
 

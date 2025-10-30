@@ -52,15 +52,15 @@ export const useMediaDevices = () => {
     }
   };
 
-  const toggleVideo = () => {
-    if (stream) {
-      const videoTracks = stream.getVideoTracks();
-      videoTracks.forEach((track) => {
-        track.enabled = !track.enabled;
-      });
-      setVideoEnabled(!videoEnabled);
-    }
-  };
+const toggleVideo = () => {
+  if (stream) {
+    const videoTracks = stream.getVideoTracks();
+    const enabled = !videoTracks[0].enabled;
+    videoTracks.forEach((track) => (track.enabled = enabled));
+    setVideoEnabled(enabled);
+  }
+};
+
 
   const stopStream = () => {
     if (stream) {
