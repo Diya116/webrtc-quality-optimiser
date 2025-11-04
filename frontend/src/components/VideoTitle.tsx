@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Mic, MicOff, Video, VideoOff, User } from 'lucide-react';
+import { MicOff, VideoOff, User } from 'lucide-react';
 import {type Participant } from '../types/index';
 import './VideoTitle.css';
 
@@ -17,6 +17,25 @@ const VideoTitle: React.FC<VideoTileProps> = ({ participant, isLocal = false }) 
     if (videoRef.current && participant.stream) {
       console.log(`✅ Attaching stream for ${participant.displayName}`);
       videoRef.current.srcObject = participant.stream;
+      // Try to autoplay and log video dimensions when available
+      const videoEl = videoRef.current;
+      const onLoaded = () => {
+        console.log(`📐 Video loadedmetadata for ${participant.displayName}:`, { videoWidth: videoEl.videoWidth, videoHeight: videoEl.videoHeight });
+      };
+      const onPlaying = () => {
+        console.log(`▶️ Playing ${participant.displayName}:`, { videoWidth: videoEl.videoWidth, videoHeight: videoEl.videoHeight });
+      };
+
+      videoEl.addEventListener('loadedmetadata', onLoaded);
+      videoEl.addEventListener('playing', onPlaying);
+
+      // Try to play (muted to satisfy autoplay policies)
+      videoEl.play().catch(e => console.warn('Autoplay attempt failed for', participant.displayName, e));
+
+      return () => {
+        videoEl.removeEventListener('loadedmetadata', onLoaded);
+        videoEl.removeEventListener('playing', onPlaying);
+      };
     }
   }, [participant.stream, participant.displayName]);
 
@@ -27,7 +46,8 @@ const VideoTitle: React.FC<VideoTileProps> = ({ participant, isLocal = false }) 
           ref={videoRef}
           autoPlay
           playsInline
-          muted={isLocal}
+          // mute by default (helps autoplay); provide UI to unmute if needed
+          muted={true}
           className="video-element"
         />
       ) : (

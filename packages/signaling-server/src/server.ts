@@ -1,6 +1,5 @@
 import express, { Express } from 'express';
-import https from 'https';
-import fs from 'fs';
+import http from 'http';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import authRoutes from './routes/auth';
@@ -16,12 +15,9 @@ dotenv.config();
 const app: Express = express();
 const PORT = process.env.PORT || 3000;
 
-// Create HTTP server
-// const httpServer = http.createServer(app);
-const httpsServer = https.createServer({
-  key: fs.readFileSync('src/ssl/key.pem','utf-8'),
-  cert: fs.readFileSync('src/ssl/cert.pem','utf-8'),
-}, app);
+// Create HTTP server for localhost testing
+// WebRTC will generate its own certificates for media encryption (DTLS-SRTP)
+const httpServer = http.createServer(app);
 // Middleware
 app.use(cors({
   origin: process.env.CLIENT_URL || 'http://localhost:5173',
@@ -61,14 +57,14 @@ app.use('*', (_, res) => {
 app.use(errorHandler);
 
 // Initialize WebSocket Manager
-new WebSocketManager(httpsServer);
+new WebSocketManager(httpServer);
 
 // Graceful shutdown
 const shutdown = async () => {
   logger.info('Shutting down gracefully...');
   
   // Close HTTP server
-  httpsServer.close(() => {
+  httpServer.close(() => {
     logger.info('HTTP server closed');
   });
 
@@ -83,7 +79,7 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 // Start server
-httpsServer.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   logger.info(`Signaling server running on port ${PORT}`);
   logger.info(` WebSocket server ready`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);

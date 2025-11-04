@@ -1,5 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 
+// Use HTTP for localhost testing - WebRTC generates its own certificates
 const SOCKET_URL = import.meta.env.VITE_SIGNALING_URL || 'http://localhost:3000';
 
 class SocketService {

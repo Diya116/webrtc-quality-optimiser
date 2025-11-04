@@ -38,7 +38,6 @@ const MeetingRoom: React.FC = () => {
   const [localParticipant, setLocalParticipant] = useState<Participant | null>(
     null
   );
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [videoEnabled, setVideoEnabled] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
@@ -76,7 +75,6 @@ const MeetingRoom: React.FC = () => {
           return;
         }
 
-        setLocalStream(stream);
 
         // Set local video
         if (localVideoRef.current) {
@@ -89,7 +87,7 @@ const MeetingRoom: React.FC = () => {
         socketRef.current = socket;
 
         // Setup socket listeners
-        setupSocketListeners(socket, displayName, stream);
+        setupSocketListeners(socket, stream);
 
         // Join meeting
         console.log(`📞 Joining meeting ${meetingId}...`);
@@ -120,7 +118,7 @@ const MeetingRoom: React.FC = () => {
 
   // Setup socket event listeners
   const setupSocketListeners = useCallback(
-    (socket: any, displayName: string, stream: MediaStream) => {
+    (socket: any, stream: MediaStream) => {
       // Successfully joined meeting
       socket.on('joined-meeting', (data: any) => {
         console.log('✅ Successfully joined meeting:', data);
@@ -147,8 +145,8 @@ const MeetingRoom: React.FC = () => {
             stream: undefined,
           });
 
-          // Create WebRTC connection for existing participant
-          handleNewPeer(p.socketId, socket, handleRemoteStream);
+          // Create WebRTC connection for existing participant (pass local stream)
+          handleNewPeer(p.socketId, socket, handleRemoteStream, stream);
         });
         setParticipants(newParticipants);
       });
@@ -166,8 +164,8 @@ const MeetingRoom: React.FC = () => {
           return newMap;
         });
 
-        // Create WebRTC connection for new participant
-        handleNewPeer(data.participant.socketId, socket, handleRemoteStream);
+    // Create WebRTC connection for new participant (pass local stream)
+    handleNewPeer(data.participant.socketId, socket, handleRemoteStream, stream);
       });
 
       // Participant left
@@ -206,7 +204,8 @@ const MeetingRoom: React.FC = () => {
       // WebRTC Signaling Events
       socket.on('offer', (data: any) => {
         console.log('📥 Received offer from:', data.from);
-        handleOffer(data, socket, handleRemoteStream);
+        // Pass local stream so we can attach local tracks when creating answer
+        handleOffer(data, socket, handleRemoteStream, stream);
       });
 
       socket.on('answer', (data: any) => {
@@ -365,7 +364,7 @@ const MeetingRoom: React.FC = () => {
           {/* Local video */}
           {localParticipant && (
             <div className="video-tile">
-              {videoEnabled && localStream ? (
+              {videoEnabled && localParticipant?.stream ? (
                 <video
                   ref={localVideoRef}
                   autoPlay

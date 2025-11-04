@@ -20,7 +20,6 @@ import {
   handleAnswer,
   handleIceCandidate,
   toggleAudio as toggleAudioTrack,
-  toggleVideo as toggleVideoTrack,
   closeAllConnections,
   startScreenShare,
   stopScreenShare,
@@ -78,12 +77,46 @@ const VideoTile: React.FC<{
 
     // For remote videos, we need to handle autoplay
     if (!isLocal) {
+      // Add metadata/playing listeners for diagnostics
+      const onLoaded = () => {
+        console.log(`📐 Video loadedmetadata for ${participant.displayName}:`, { 
+          videoWidth: videoElement.videoWidth, 
+          videoHeight: videoElement.videoHeight,
+          tracks: stream.getTracks().map(t => ({ kind: t.kind, enabled: t.enabled, readyState: t.readyState, muted: t.muted }))
+        });
+        
+        // If videoWidth is still 0 after loadedmetadata, try force refresh
+        if (videoElement.videoWidth === 0 && stream.getVideoTracks().length > 0) {
+          console.warn(`⚠️ Video dimensions are 0 for ${participant.displayName}, attempting refresh...`);
+          setTimeout(() => {
+            const currentStream = videoElement.srcObject;
+            videoElement.srcObject = null;
+            videoElement.srcObject = currentStream;
+            videoElement.play().catch(e => console.warn('Refresh play failed:', e));
+          }, 100);
+        }
+      };
+      const onPlaying = () => {
+        console.log(`▶️ Playing ${participant.displayName}:`, { 
+          videoWidth: videoElement.videoWidth, 
+          videoHeight: videoElement.videoHeight 
+        });
+        
+        // Check again after playing started
+        if (videoElement.videoWidth === 0 && stream.getVideoTracks().length > 0) {
+          console.error(`❌ Video still has 0 dimensions while playing for ${participant.displayName}`);
+        }
+      };
+      videoElement.addEventListener('loadedmetadata', onLoaded);
+      videoElement.addEventListener('playing', onPlaying);
+
       const playVideo = async () => {
         try {
           // Wait a tiny bit for the stream to be ready
           await new Promise(resolve => setTimeout(resolve, 100));
           
           console.log(`▶️ Attempting to play video for ${participant.displayName}`);
+          // Try to play (muted to satisfy autoplay policies)
           await videoElement.play();
           console.log(`✅ Video playing for ${participant.displayName}`);
           setIsPlaying(true);
@@ -120,11 +153,13 @@ const VideoTile: React.FC<{
         track.addEventListener('unmute', handleTrackActive);
       });
 
-      // Cleanup track listeners
+      // Cleanup track & video listeners
       return () => {
         stream.getTracks().forEach(track => {
           track.removeEventListener('unmute', handleTrackActive);
         });
+        videoElement.removeEventListener('loadedmetadata', onLoaded);
+        videoElement.removeEventListener('playing', onPlaying);
       };
     } else {
       // Local video - just ensure it's playing
@@ -160,7 +195,8 @@ const VideoTile: React.FC<{
             ref={ref}
             autoPlay
             playsInline
-            muted={isLocal}
+            // mute by default so autoplay is allowed
+            muted={true}
             className="video-element"
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />
@@ -233,7 +269,6 @@ const MeetingRoom: React.FC = () => {
   const [localParticipant, setLocalParticipant] = useState<Participant | null>(
     null
   );
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [videoEnabled, setVideoEnabled] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
@@ -244,8 +279,57 @@ const MeetingRoom: React.FC = () => {
 
   const socketRef = useRef<any>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  // Map of video refs for remote participants (used by diagnostics)
+  const videoRefs = useRef<Map<string, React.RefObject<HTMLVideoElement | null>>>(new Map());
   const isInitializedRef = useRef(false);
   const localStreamRef = useRef<MediaStream | null>(null);
+
+  const getVideoRefFor = (id: string) => {
+    let ref = videoRefs.current.get(id);
+    if (!ref) {
+      ref = React.createRef<HTMLVideoElement | null>();
+      videoRefs.current.set(id, ref);
+    }
+    return ref as React.RefObject<HTMLVideoElement | null>;
+  };
+
+  const diagnosticsPlay = (id: string) => {
+    const ref = videoRefs.current.get(id);
+    if (ref && ref.current) {
+      ref.current.play().then(() => console.log('▶️ Diagnostics: play success for', id)).catch(err => console.warn('Diagnostics: play failed', id, err));
+    } else {
+      console.warn('Diagnostics: no video element for', id);
+    }
+  };
+
+  const diagnosticsInfo = async (id: string) => {
+    const ref = videoRefs.current.get(id);
+    if (ref && ref.current) {
+      const el = ref.current;
+      const stream = el.srcObject as MediaStream | null;
+      console.log(`🔍 Video element diagnostics for ${id}:`, {
+        paused: el.paused,
+        muted: el.muted,
+        videoWidth: el.videoWidth,
+        videoHeight: el.videoHeight,
+        srcObject: stream?.id,
+        videoTracks: stream?.getVideoTracks().map(t => ({
+          id: t.id,
+          kind: t.kind,
+          enabled: t.enabled,
+          readyState: t.readyState,
+          muted: t.muted,
+          label: t.label,
+        })) || [],
+      });
+      
+      // Also get peer connection stats
+      const { getPeerDiagnostics } = await import('../utils/webrtc');
+      await getPeerDiagnostics(id);
+    } else {
+      console.warn('Diagnostics: no video element for', id);
+    }
+  };
 
   // Initialize and join meeting
   useEffect(() => {
@@ -285,7 +369,8 @@ const MeetingRoom: React.FC = () => {
           });
           
           localStreamRef.current = stream;
-          setLocalStream(stream);
+          // store stream in ref for toggles and sharing
+          localStreamRef.current = stream;
           setAudioEnabled(true);
           setVideoEnabled(true);
           
@@ -416,7 +501,7 @@ const MeetingRoom: React.FC = () => {
               stream: undefined,
             });
 
-            // Create WebRTC connection for existing participant
+            // Create WebRTC connection for existing participant (pass local stream)
             console.log('🔗 Creating peer connection for:', p.socketId);
             handleNewPeer(p.socketId, socket, handleRemoteStream, stream);
           }
@@ -441,9 +526,9 @@ const MeetingRoom: React.FC = () => {
           return newMap;
         });
 
-        // Create WebRTC connection for new participant
-        console.log('🔗 Creating peer connection for new participant:', data.participant.socketId);
-        handleNewPeer(data.participant.socketId, socket, handleRemoteStream, stream);
+  // Create WebRTC connection for new participant (pass local stream)
+  console.log('🔗 Creating peer connection for new participant:', data.participant.socketId);
+  handleNewPeer(data.participant.socketId, socket, handleRemoteStream, stream);
       });
 
       // Participant left
@@ -704,8 +789,39 @@ const MeetingRoom: React.FC = () => {
 
           {/* Remote videos */}
           {Array.from(participants.values()).map((participant) => (
-            <VideoTile key={participant.socketId} participant={participant} />
+            <VideoTile key={participant.socketId} participant={participant} videoRef={getVideoRefFor(participant.socketId)} />
           ))}
+        </div>
+      </div>
+
+      {/* Diagnostics panel (visible when console logs are not available) */}
+      <div style={{ position: 'fixed', right: 12, top: 80, zIndex: 1000, background: 'rgba(0,0,0,0.8)', color: 'white', padding: 10, borderRadius: 6, fontSize: 12, maxWidth: 320 }}>
+        <div style={{ fontWeight: 'bold', marginBottom: 8, fontSize: 14 }}>🔍 Connection Diagnostics</div>
+        <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+          {localParticipant && (
+            <div style={{ marginBottom: 8, padding: 6, background: 'rgba(255,255,255,0.05)', borderRadius: 4 }}>
+              <div style={{ fontSize: 11, fontWeight: 'bold' }}>You (Local)</div>
+              <div style={{ fontSize: 10 }}>ID: {localParticipant.socketId.slice(0, 8)}...</div>
+              <div style={{ fontSize: 10 }}>Stream: {localParticipant.stream ? '✅' : '❌'}</div>
+            </div>
+          )}
+          {Array.from(participants.values()).map(p => (
+            <div key={p.socketId} style={{ marginBottom: 8, padding: 6, background: 'rgba(255,255,255,0.05)', borderRadius: 4 }}>
+              <div style={{ fontSize: 11, fontWeight: 'bold' }}>{p.displayName}</div>
+              <div style={{ fontSize: 10 }}>ID: {p.socketId.slice(0, 8)}...</div>
+              <div style={{ fontSize: 10 }}>Stream: {p.stream ? `✅ ${p.stream.id.slice(0, 8)}...` : '❌ none'}</div>
+              <div style={{ fontSize: 10, marginTop: 4, color: '#fbbf24' }}>
+                ⚠️ Check console for ICE state
+              </div>
+              <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
+                <button onClick={() => diagnosticsPlay(p.socketId)} style={{ fontSize: 10, padding: '2px 6px', cursor: 'pointer' }}>▶ Play</button>
+                <button onClick={() => diagnosticsInfo(p.socketId)} style={{ fontSize: 10, padding: '2px 6px', cursor: 'pointer' }}>ℹ Info</button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 8, padding: 6, background: 'rgba(255, 193, 7, 0.1)', borderRadius: 4, fontSize: 10 }}>
+          💡 <strong>Tip:</strong> If ICE state is stuck at "checking", peers can't connect. TURN servers added to help.
         </div>
       </div>
 
